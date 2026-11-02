@@ -1,0 +1,2 @@
+polaris-platform>=0.1.0
+PySide6-Essentials>=6.5
