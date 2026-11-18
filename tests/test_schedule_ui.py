@@ -26,7 +26,10 @@ else:
     import shiboken6
     from polaris_platform.bootstrap import build, default_config
     from polaris_platform.component import Component
-    sys.path.insert(0, str(ROOT / 'plugins' / 'schedule'))
+    import json
+    EXPORTED = os.environ.get('POLARIS_TEST_SCHEDULE_EXPORT')
+    exported = json.loads(Path(EXPORTED).read_text()) if EXPORTED else None
+    sys.path.insert(0, exported['directory'] if exported else str(ROOT / 'plugins' / 'schedule'))
     from polaris_schedule import Schedule
 
     def find(item, name):
@@ -51,7 +54,17 @@ else:
             self.runtime.start_component('user')
             self.manifest = {'id': 'org.polaris.schedule', 'name': 'Schedule', 'version': '1', 'platformApi': 1,
                              'entry': {'mode': 'inprocess'}}
-            self.component = Schedule(self.directory.name)
+            if exported:
+                from copy import deepcopy
+                from polaris_platform.bootstrap import load_factory
+                import polaris_schedule
+                self.manifest = deepcopy(exported['manifest'])
+                factory_manifest = deepcopy(self.manifest)
+                factory_manifest['entry']['kwargs'] = dict(data_dir=self.directory.name)
+                self.component = load_factory(factory_manifest, exported['directory'], self.runtime)()
+                self.assertEqual(Path(polaris_schedule.__file__).parent, Path(exported['directory']) / 'polaris_schedule')
+            else:
+                self.component = Schedule(self.directory.name)
             self.runtime.install(self.manifest, lambda: self.component)
             self.runtime.start_component('org.polaris.schedule')
             for operation in self.runtime.status('org.polaris.schedule')['description']['operations']:
@@ -65,6 +78,10 @@ else:
             self.window.show()
             self.resource = self.call('create_view', {'view': 'main', 'parent': self.window.rootObject()})
             self.item = self.resource['item']
+            if exported:
+                from PySide6.QtQml import QQmlComponent
+                definition = self.item.findChild(QQmlComponent)
+                self.assertEqual(Path(definition.url().toLocalFile()), Path(exported['directory']) / 'polaris_schedule/Schedule.qml')
             self.item.setWidth(780)
             self.item.setHeight(620)
             QTest.qWait(80)
@@ -102,6 +119,60 @@ else:
                 QCoreApplication.sendEvent(self.window, QKeyEvent(QEvent.KeyRelease, 0, Qt.NoModifier, char))
             QTest.qWait(20)
 
+        def test_direct_navigation_reschedule_reorder_and_planner_capture(self):
+            self.click('nav_收集箱')
+            self.type('quickAdd', 'Capture first')
+            QTest.keyClick(self.window, Qt.Key_Return)
+            QTest.qWait(40)
+            self.type('quickAdd', 'Capture second')
+            QTest.keyClick(self.window, Qt.Key_Return)
+            QTest.qWait(40)
+            self.assertTrue(self.control('quickAdd').hasActiveFocus())
+            tasks = self.call('get')['tasks']
+            self.runtime.revoke('user', 'org.polaris.schedule', 'reorder')
+            self.click('taskActions_1')
+            self.click('moveUp_1')
+            self.assertEqual(self.call('get')['tasks'][0]['title'], 'Capture first')
+            self.runtime.grant('user', 'org.polaris.schedule', 'reorder')
+            self.click('taskActions_1')
+            self.click('moveUp_1')
+            QTest.qWait(40)
+            self.assertEqual(self.call('get')['tasks'][0]['title'], 'Capture second', self.component._presentation._views[self.resource['handle']][2].lastError)
+            self.click('taskActions_0')
+            self.click('planTomorrow_0')
+            self.assertEqual(self.control('taskList').property('count'), 1)
+            self.assertEqual(self.call('get')['tasks'][0]['date'], self.item.currentDay(1))
+            self.click('mode_1')
+            target = self.item.property('selectedDate')
+            self.click('addDay_' + target)
+            self.type('quickAdd', 'Day column capture')
+            QTest.keyClick(self.window, Qt.Key_Return)
+            QTest.qWait(40)
+            self.assertEqual(next(t for t in self.call('get')['tasks'] if t['title'] == 'Day column capture')['date'], target)
+            # Drag the remaining inbox task with the real handle to a date column.
+            handle = self.control('pending_dragTask_0')
+            drop = self.control('dropDay_' + target)
+            start = handle.mapToScene(QPointF(handle.width()/2, handle.height()/2))
+            end = drop.mapToScene(QPointF(drop.width()/2, drop.height()/2))
+            QTest.mousePress(self.window, Qt.LeftButton, Qt.NoModifier, QPoint(round(start.x()), round(start.y())))
+            for i in range(1, 13):
+                point = start + (end - start) * (i/12)
+                QTest.mouseMove(self.window, QPoint(round(point.x()), round(point.y())), 20)
+            QTest.mouseRelease(self.window, Qt.LeftButton, Qt.NoModifier, QPoint(round(end.x()), round(end.y())))
+            QTest.qWait(80)
+            self.assertEqual(next(t for t in self.call('get')['tasks'] if t['title'] == 'Capture first')['date'], target)
+            self.window.grabWindow().save('/tmp/polaris-schedule-planning-new.png')
+            self.click('mode_0')
+            self.click('nav_我的一天')
+            self.type('quickAdd', 'Keyboard draft')
+            QTest.keyClick(self.window, Qt.Key_F, Qt.ControlModifier)
+            QTest.qWait(30)
+            self.assertTrue(self.control('scheduleSearch').hasActiveFocus())
+            QTest.keyClick(self.window, Qt.Key_N, Qt.ControlModifier)
+            QTest.qWait(30)
+            self.assertTrue(self.control('quickAdd').hasActiveFocus())
+            self.assertEqual(self.control('quickAdd').property('text'), 'Keyboard draft')
+
         def test_day_rollover_follows_today_but_keeps_explicit_browsing(self):
             self.item.setProperty('todayDate', '2026-10-31')
             self.item.setProperty('selectedDate', '2026-10-31')
@@ -113,6 +184,160 @@ else:
             self.item.setWidth(370)
             self.item.setHeight(220)
             self.assertTrue(self.control('todayButton').property('visible'))
+
+        def test_shared_clock_rollover_buttons_and_permission_errors(self):
+            from datetime import datetime, timezone, timedelta
+            from polaris_schedule.clock import LocalClock
+            class FakeClock(LocalClock):
+                value = datetime(2026, 11, 4, 23, 59, tzinfo=timezone(timedelta(hours=8)))
+                def now(self):
+                    return self.value
+            clock = FakeClock()
+            self.component.clock = self.component.store.clock = clock
+            bridge = self.component._presentation._views[self.resource['handle']][2]
+            self.assertTrue(bridge.refreshTime())
+            self.item.selectToday()
+            self.assertEqual(self.item.property('selectedDate'), '2026-11-04')
+            clock.value = datetime(2026, 11, 5, 0, 1, tzinfo=timezone(timedelta(hours=9)))
+            QTest.qWait(1100)  # Exercise the actual periodic refresh after a clock jump.
+            self.assertEqual(self.item.property('selectedDate'), '2026-11-05')
+            self.item.setProperty('selectedDate', '2026-12-25')
+            clock.value = datetime(2026, 11, 6, 0, 1, tzinfo=timezone.utc)
+            self.assertTrue(bridge.refreshTime())
+            self.assertEqual(self.item.property('selectedDate'), '2026-12-25')
+            self.click('todayButton')
+            self.assertEqual(self.item.property('selectedDate'), '2026-11-06')
+            task = self.call('add', {'title': 'Clock task', 'date': '2026-11-06'})
+            QTest.qWait(40)
+            self.item.openTask(task)
+            QTest.qWait(40)
+            self.click('rescheduleTomorrow')
+            self.assertEqual(self.control('taskDate').property('text'), '2026-11-07')
+            self.click('rescheduleToday')
+            self.assertEqual(self.control('taskDate').property('text'), '2026-11-06')
+            self.runtime.revoke('user', 'org.polaris.schedule', 'update')
+            self.click('saveTask')
+            failed = bridge.lastError
+            self.assertTrue(failed)
+            self.assertTrue(bridge.refreshTime())
+            self.assertEqual(bridge.lastError, failed)
+            self.runtime.revoke('user', 'org.polaris.schedule', 'time_context')
+            self.assertFalse(bridge.refreshTime())
+            self.assertEqual(self.item.property('todayDate'), '2026-11-06')
+            self.runtime.grant('user', 'org.polaris.schedule', 'time_context')
+            self.assertTrue(bridge.refreshTime())
+            self.assertEqual(bridge.lastError, failed)
+
+        def test_compact_planner_restores_daily_navigation(self):
+            for mode in ('周', '月'):
+                self.item.setWidth(780)
+                self.item.setHeight(620)
+                self.item.setProperty('selectedDate', '2026-11-04')
+                self.item.setProperty('presentation', mode)
+                self.item.setWidth(370)
+                self.item.setHeight(220)
+                QTest.qWait(30)
+                self.assertEqual(self.item.property('presentation'), '列表')
+                self.assertEqual(self.control('selectedDay').property('text'), '11 / 04')
+                self.click('nextDay')
+                self.assertEqual(self.item.property('selectedDate'), '2026-11-05')
+
+        def open_fixture_editor(self, date='2026-12-31', time='09:37'):
+            self.item.setProperty('selectedDate', date)
+            task = self.call('add', dict(title='Picker fixture', date=date, time=time))
+            QTest.qWait(40)
+            row = self.control('completeTask_0').parentItem()
+            point = row.mapToScene(QPointF(140, 18))
+            QTest.mouseClick(self.window, Qt.LeftButton, Qt.NoModifier, QPoint(round(point.x()), round(point.y())))
+            QTest.qWait(40)
+            return task
+
+        def open_time_options(self, name):
+            combo = self.control(name)
+            point = combo.mapToScene(QPointF(combo.width() - 10, combo.height() / 2))
+            QTest.mouseClick(self.window, Qt.LeftButton, Qt.NoModifier, QPoint(round(point.x()), round(point.y())))
+            QTest.qWait(35)
+
+        def test_time_picker_pointer_keyboard_clear_and_save(self):
+            task = self.open_fixture_editor()
+            self.click('openTimePicker')
+            self.assertEqual(self.control('timePickerMinutes').property('editText'), '37')
+            self.open_time_options('timePickerHours')
+            self.click('timePickerHoursOption_10')
+            self.open_time_options('timePickerMinutes')
+            self.click('timePickerMinutesOption_3')
+            self.click('applyPickedTime')
+            self.assertEqual(self.control('taskTime').property('text'), '10:15')
+            self.assertEqual(self.call('get')['tasks'][0]['time'], '09:37')
+            self.click('openTimePicker')
+            self.type('timePickerMinutes', '37')
+            self.click('applyPickedTime')
+            self.assertEqual(self.control('taskTime').property('text'), '10:37')
+            self.click('saveTask')
+            self.assertEqual(self.call('get')['tasks'][0]['time'], '10:37')
+            # Full range remains available, independent of the five-minute list.
+            for value in ('00:00', '23:59'):
+                row = self.control('completeTask_0').parentItem()
+                self.click(row)
+                self.click('openTimePicker')
+                self.type('timePickerHours', value[:2])
+                self.type('timePickerMinutes', value[3:])
+                self.click('applyPickedTime')
+                self.assertEqual(self.control('taskTime').property('text'), value)
+                self.click('saveTask')
+                self.assertEqual(self.call('get')['tasks'][0]['time'], value)
+            self.click(self.control('completeTask_0').parentItem())
+            self.click('openTimePicker')
+            self.window.grabWindow().save('/tmp/polaris-schedule-time-picker.png')
+            self.type('timePickerMinutes', '12')
+            self.click('cancelPickedTime')
+            self.assertEqual(self.control('taskTime').property('text'), '23:59')
+            self.click('openTimePicker')
+            self.assertEqual(self.control('timePickerMinutes').property('editText'), '59')
+            self.click('clearPickedTime')
+            self.assertEqual(self.control('taskTime').property('text'), '')
+            self.click('saveTask')
+            self.assertEqual(self.call('get')['tasks'][0]['time'], '')
+            self.assertEqual(Schedule(self.directory.name).store.tasks()[0]['time'], '')
+
+        def test_date_picker_pointer_draft_today_and_narrow_editor(self):
+            self.open_fixture_editor()
+            self.click('openDatePicker')
+            self.click('datePickerNextMonth')
+            self.click('datePickerDay_2027-01-15')
+            self.click('datePickerCancel')
+            self.assertEqual(self.control('taskDate').property('text'), '2026-12-31')
+            self.click('openDatePicker')
+            self.assertTrue(self.control('datePickerDay_2026-12-31').isVisible())
+            self.click('datePickerNextMonth')
+            self.click('datePickerDay_2027-01-15')
+            self.click('datePickerConfirm')
+            self.assertEqual(self.control('taskDate').property('text'), '2027-01-15')
+            self.assertEqual(self.call('get')['tasks'][0]['date'], '2026-12-31')
+            self.type('taskDate', '2028-02-01')
+            self.click('openDatePicker')
+            self.click('datePickerDay_2028-02-29')
+            self.click('datePickerConfirm')
+            self.assertEqual(self.control('taskDate').property('text'), '2028-02-29')
+            self.window.resize(370, 360); self.item.setWidth(370); self.item.setHeight(360)
+            QTest.qWait(40)
+            self.click('openDatePicker')
+            self.window.grabWindow().save('/tmp/polaris-schedule-date-picker.png')
+            self.click('datePickerToday')
+            self.click('datePickerConfirm')
+            self.assertEqual(self.control('taskDate').property('text'), self.item.property('todayDate'))
+            self.click('saveTask')
+            self.assertEqual(self.call('get')['tasks'][0]['date'], self.item.property('todayDate'))
+            self.item.setProperty('selectedDate', self.item.property('todayDate'))
+            QTest.qWait(30)
+            self.click(self.control('completeTask_0').parentItem())
+            self.click('rescheduleInbox')
+            self.assertEqual(self.control('taskDate').property('text'), '')
+            self.assertEqual(self.control('taskTime').property('text'), '')
+            self.click('saveTask')
+            saved = self.call('get')['tasks'][0]
+            self.assertIsNone(saved['date'])
+            self.assertEqual(saved['time'], '')
 
         def test_crud_editor_subtask_restart_and_revocation(self):
             self.type('quickAdd', '<b>Planning</b>')
@@ -214,11 +439,9 @@ else:
             child = self.call('add_subtask', {'identity': past['id'], 'title': 'Checklist'})
             self.call('update_subtask', {'parent_id': past['id'], 'subtask_id': child['id'], 'notes': 'buried keyword'})
             QTest.qWait(60)
-            self.click('scheduleSections')
-            self.click('section_4')
+            self.click('nav_待重新安排')
             self.assertEqual(self.control('taskList').property('count'), 1)
-            self.click('scheduleSections')
-            self.click('section_1')
+            self.click('nav_收集箱')
             self.assertEqual(self.control('taskList').property('count'), 1)
             self.click('searchButton')
             self.type('scheduleSearch', 'buried keyword')
@@ -242,10 +465,8 @@ else:
             self.type('scheduleSearch', 'Review')
             self.assertEqual(self.control('taskList').property('count'), 1)
             self.click('searchButton')
-            self.click('scheduleModes')
             self.click('mode_1')
             self.window.grabWindow().save('/tmp/polaris-schedule-week.png')
-            self.click('scheduleModes')
             self.click('mode_2')
             self.click('selectedDay')
             self.type('dayInput', '2026-01-31')
@@ -262,10 +483,8 @@ else:
             self.type('dayInput', date.today().isoformat())
             self.click('chooseDay')
             self.window.grabWindow().save('/tmp/polaris-schedule-month.png')
-            self.click('scheduleModes')
             self.click('mode_0')
-            self.click('scheduleSections')
-            self.click('section_1')
+            self.click('nav_收集箱')
             self.type('quickAdd', 'Inbox task')
             QTest.keyClick(self.window, Qt.Key_Return)
             QTest.qWait(40)

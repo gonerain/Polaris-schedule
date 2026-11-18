@@ -4,14 +4,26 @@ import QtQuick.Layouts
 
 Flickable {
     id: planner
+    component ThinScrollBar: ScrollBar {
+        id: bar; padding: 3
+        visible: size > 0 && size < 1
+        contentItem: Rectangle { implicitWidth: 5; implicitHeight: 5; radius: 3; color: colors.muted; opacity: bar.pressed ? 0.8 : 0.35 }
+        background: Item { }
+    }
+    property var appearance: null
+    SchedulePalette { id: fallback }
+    readonly property var colors: appearance || fallback
+    property string today: ""
     required property string date
     required property bool monthMode
     required property var tasks
     signal dayClicked(string date)
     signal taskClicked(var task)
+    signal taskDropped(var task, string date)
+    signal addRequested(string date)
     clip: true
-    contentWidth: Math.max(width, 7 * 100)
-    contentHeight: Math.max(height, monthMode ? 470 : 270)
+    contentWidth: Math.max(width, 7 * 80)
+    contentHeight: Math.max(height, monthMode ? 600 : 270)
     boundsBehavior: Flickable.StopAtBounds
     readonly property var days: {
         var start = new Date(date + 'T12:00:00')
@@ -37,7 +49,18 @@ Flickable {
                 property var entries: planner.tasks.filter(function(t){ return t.date === day.modelData }).sort(function(a,b){ return (a.time || '24:00').localeCompare(b.time || '24:00') })
                 width: (planner.contentWidth-24)/7
                 height: planner.monthMode ? (planner.contentHeight-20)/6 : planner.contentHeight
-                color: modelData === planner.date ? '#eaf0fc' : '#ffffff'
+                color: drop.containsDrag ? colors.selected : modelData === planner.date ? colors.selected : colors.surface
+                border.width: modelData === planner.today || drop.containsDrag ? 1 : 0
+                border.color: colors.accent
+                DropArea {
+                    id: drop
+                    objectName: 'dropDay_' + day.modelData
+                    anchors.fill: parent
+                    keys: ['polaris-schedule-task']
+                    onDropped: function(event) {
+                        if (event.source && event.source.task) { planner.taskDropped(event.source.task, day.modelData); event.acceptProposedAction() }
+                    }
+                }
                 radius: 7
                 clip: true
                 readonly property int capacity: Math.max(1, Math.floor((height - 42) / 20))
@@ -46,7 +69,11 @@ Flickable {
                     anchors.fill: parent
                     anchors.margins: 5
                     spacing: 2
-                    ScheduleButton { width: parent.width; text: ['一','二','三','四','五','六','日'][day.index%7] + ' ' + Number(day.modelData.slice(8)); selected: day.modelData === planner.date; onClicked: planner.dayClicked(day.modelData) }
+                    Row {
+                        width: parent.width
+                        ScheduleButton { appearance: planner.colors; width: parent.width - 24; padding: 2; text: ['一','二','三','四','五','六','日'][day.index%7] + ' ' + Number(day.modelData.slice(8)); selected: day.modelData === planner.date; onClicked: planner.dayClicked(day.modelData) }
+                        ScheduleButton { appearance: planner.colors; objectName: 'addDay_' + day.modelData; width: 24; implicitWidth: 24; padding: 0; text: '+'; Accessible.name: '添加到 ' + day.modelData; onClicked: planner.addRequested(day.modelData) }
+                    }
                     Repeater {
                         model: day.entries.slice(0, day.previewCount)
                         delegate: Text {
@@ -55,7 +82,7 @@ Flickable {
                             text: (modelData.done ? '✓ ' : '') + (modelData.time ? modelData.time + ' ' : '') + modelData.title
                             textFormat: Text.PlainText
                             font.pixelSize: 11
-                            color: modelData.done ? '#9aa4b3' : '#334b72'
+                            color: modelData.done ? colors.muted : colors.text
                             elide: Text.ElideRight
                             height: 18
                             MouseArea { anchors.fill: parent; onClicked: planner.taskClicked(parent.modelData) }
@@ -67,13 +94,13 @@ Flickable {
                         visible: day.entries.length > day.previewCount
                         text: '+' + (day.entries.length - day.previewCount) + '项'
                         textFormat: Text.PlainText
-                        color: '#4167b0'; font.pixelSize: 11
+                        color: colors.accent; font.pixelSize: 11
                         MouseArea { anchors.fill: parent; onClicked: planner.dayClicked(day.modelData) }
                     }
                 }
             }
         }
     }
-    ScrollBar.horizontal: ScrollBar { }
-    ScrollBar.vertical: ScrollBar { }
+    ScrollBar.horizontal: ThinScrollBar { }
+    ScrollBar.vertical: ThinScrollBar { }
 }

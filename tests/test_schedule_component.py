@@ -38,6 +38,54 @@ class ScheduleComponentTests(unittest.TestCase):
     def call(self, operation, **params):
         return self.runtime.client('user').call(self.identity, operation, params, context=self.context)
 
+    def test_application_binding_metadata_for_business_operations(self):
+        ops = self.runtime.status(self.identity)['description']['operations']
+        names = ('get', 'time_context', 'tasks', 'add', 'update', 'delete', 'undo_delete',
+                 'add_subtask', 'update_subtask', 'delete_subtask', 'reorder', 'move_overdue', 'organize_day')
+        for name in names:
+            self.assertEqual(ops[name]['applicationBinding'], 'instance')
+            self.assertEqual(ops[name]['provides'], 'polaris.schedule.' + name.replace('_', '-') + '@1')
+        self.assertNotIn('applicationBinding', ops['create_view'])
+
+    def test_time_context_and_discoverable_business_contracts(self):
+        from datetime import datetime, timezone, timedelta
+        from polaris_schedule.clock import LocalClock
+        class FakeClock(LocalClock):
+            value = datetime(2026, 11, 4, 23, 59, tzinfo=timezone(timedelta(hours=8)))
+            calls = 0
+            def now(self):
+                self.calls += 1
+                return self.value
+        component = self.runtime.component_instance(self.identity)
+        clock = FakeClock()
+        component.clock = component.store.clock = clock
+        time = self.call('time_context')
+        self.assertEqual(clock.calls, 1)
+        self.assertEqual(time['now'], '2026-11-04T23:59:00+08:00')
+        self.assertEqual(time['date'], '2026-11-04')
+        self.assertEqual(time['timezone']['utcOffsetMinutes'], 480)
+        self.assertEqual(self.call('get')['timeContext'], time)
+        task = self.call('add', title='Due yesterday', date='2026-11-04')
+        clock.value = datetime(2026, 11, 5, 0, 1, tzinfo=timezone(timedelta(hours=9)))
+        self.assertEqual(self.call('time_context')['timezone']['utcOffsetMinutes'], 540)
+        self.assertEqual(self.call('get')['timeContext']['date'], '2026-11-05')
+        self.assertEqual([t['id'] for t in self.call('move_overdue', target_date='2026-11-06')], [task['id']])
+        # Explicit historical reference dates still take precedence.
+        self.assertEqual(self.call('move_overdue', target_date='2026-11-08', today='2026-11-01'), [])
+        description = component.describe()
+        for name, meta in description['operations'].items():
+            if meta.get('profile') == 'qt-native':
+                continue
+            self.assertTrue(meta['description'])
+            self.assertEqual(meta['parameters']['type'], 'object')
+            self.assertFalse(meta['parameters']['additionalProperties'])
+        self.assertEqual(description['operations']['update']['parameters']['required'], ['identity'])
+        description['operations']['update']['parameters']['properties'].clear()
+        self.assertIn('identity', component.describe()['operations']['update']['parameters']['properties'])
+        child = self.call('add_subtask', identity=task['id'], title='Step')
+        self.call('update_subtask', parent_id=task['id'], subtask_id=child['id'], done=True)
+        self.assertTrue(self.call('tasks', date='2026-11-06')[0]['subtasks'][0]['done'])
+
     def test_business_without_view_and_restart_persistence(self):
         task = self.call('add', title='Plan', date='2026-10-30')
         self.call('add_subtask', identity=task['id'], title='First step')

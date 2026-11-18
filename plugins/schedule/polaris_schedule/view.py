@@ -48,6 +48,7 @@ class Dispatcher(QObject):
 class Bridge(QObject):
     changed = Signal()
     errorChanged = Signal()
+    timeChanged = Signal()
 
     def __init__(self, component, context, parent):
         super().__init__(parent)
@@ -55,14 +56,20 @@ class Bridge(QObject):
         self._data = '{}'
         self._read_error = ''
         self._operation_error = ''
+        self._time_error = ''
+        self._time = '{}'
 
     @Property(str, notify=changed)
     def dataJson(self):
         return self._data
 
+    @Property(str, notify=timeChanged)
+    def timeJson(self):
+        return self._time
+
     @Property(str, notify=errorChanged)
     def lastError(self):
-        return '\n'.join(filter(None, (self._operation_error, self._read_error)))
+        return '\n'.join(filter(None, (self._operation_error, self._read_error, self._time_error)))
 
     def _failure(self, error, operation=False):
         message = getattr(error, 'message', str(error))
@@ -78,6 +85,7 @@ class Bridge(QObject):
         try:
             data = self._context.call(self._component.port.id, 'get', {})
             self._data = json.dumps(data, ensure_ascii=False)
+            self._set_time(data['timeContext'])
         except Exception as error:
             # A revoked read permission must not keep exposing the cached snapshot.
             self._data = '{}'
@@ -85,6 +93,25 @@ class Bridge(QObject):
             return self._failure(error)
         self._read_error = ''
         self.changed.emit()
+        self.errorChanged.emit()
+        return True
+
+    def _set_time(self, value):
+        self._time = json.dumps(value, ensure_ascii=False)
+        self._time_error = ''
+        self.timeChanged.emit()
+
+    @Slot(result=bool)
+    def refreshTime(self):
+        try:
+            value = self._context.call(self._component.port.id, 'time_context', {})
+            self._set_time(value)
+        except Exception as error:
+            self._time = '{}'
+            self._time_error = getattr(error, 'message', str(error))
+            self.timeChanged.emit()
+            self.errorChanged.emit()
+            return False
         self.errorChanged.emit()
         return True
 

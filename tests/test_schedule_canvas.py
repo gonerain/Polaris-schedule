@@ -100,7 +100,8 @@ else:
             self.wait(lambda: (self.manager.bridge.planJson != '[]' and not self.manager.bridge.busy) or bool(self.canvas.status()['mounts']))
             if self.manager.bridge.planJson != '[]':
                 permissions = json.loads(self.manager.bridge.planJson)
-                self.assertFalse(any(row['name'] in ('reorder', 'organize_day', 'move_overdue') for row in permissions))
+                self.assertTrue(any(row['name'] == 'reorder' for row in permissions))
+                self.assertFalse(any(row['name'] in ('organize_day', 'move_overdue') for row in permissions))
                 self.wait(lambda: find(self.manager._view.contentItem(), 'confirmPermission') is not None or bool(self.canvas.status()['mounts']))
                 if not self.canvas.status()['mounts']:
                     self.click('confirmPermission', self.manager._view)

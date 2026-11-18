@@ -7,6 +7,7 @@ from functools import wraps
 from threading import RLock
 
 from .storage import SnapshotRepository, StorageError
+from .clock import LocalClock
 
 ANY = object()
 
@@ -68,7 +69,8 @@ def _locked(method):
 
 
 class ScheduleStore:
-    def __init__(self, path=None):
+    def __init__(self, path=None, clock=None):
+        self.clock = clock if clock is not None else LocalClock()
         self._lock = RLock()
         self._repository = SnapshotRepository(path, validate_snapshot) if path is not None else None
         self._data = self._repository.load() if self._repository else {'version': 1, 'tasks': []}
@@ -212,7 +214,7 @@ class ScheduleStore:
         valid_date(target_date)
         if target_date is None:
             raise ValueError('目标日期不能为空')
-        today = Date.today().isoformat() if today is None else valid_date(today)
+        today = self.clock.context()['date'] if today is None else valid_date(today)
         if today is None:
             raise ValueError('今日日期不能为空')
         changes = [{'id': task['id'], 'date': target_date} for task in self._data['tasks'] if task['date'] is not None and task['date'] < today and not task['done']]

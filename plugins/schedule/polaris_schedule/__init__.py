@@ -1,10 +1,13 @@
 """Local schedule capabilities; Qt is imported only when a view is requested."""
+from copy import deepcopy
 from pathlib import Path
 import os
 import threading
 from polaris_platform.sdk import Component
 from polaris_platform.protocol import PlatformError
 from .model import ScheduleStore
+from .clock import LocalClock
+from .capabilities import BUSINESS_METADATA
 
 WRITES = ('add', 'update', 'delete', 'undo_delete', 'add_subtask', 'update_subtask',
           'delete_subtask', 'reorder', 'move_overdue', 'organize_day')
@@ -19,19 +22,23 @@ def default_data_dir():
 
 
 class Schedule(Component):
-    def __init__(self, data_dir=None):
+    def __init__(self, data_dir=None, clock=None):
         super().__init__()
-        self.store = ScheduleStore(Path(data_dir or default_data_dir()) / 'schedule.json')
+        self.clock = clock if clock is not None else LocalClock()
+        self.store = ScheduleStore(Path(data_dir or default_data_dir()) / 'schedule.json', clock=self.clock)
         self._lock = threading.RLock()
         self._presentation = None
         self.views = [{'id': 'main', 'adapter': 'qt-quick-item', 'title': '日程',
                        'create': 'create_view', 'release': 'release_view',
-                       'permissions': [{'name': 'get', 'access': 'read'}] +
-                                      [{'name': name, 'access': 'write'} for name in WRITES if name not in ('reorder', 'move_overdue', 'organize_day')]}]
-        self.operation('get')(self.get)
-        self.operation('tasks')(self.store.tasks)
+                       'preferredSize': {'width': 320, 'height': 360},
+                       'permissions': [{'name': name, 'access': 'read'} for name in ('get', 'time_context')] +
+                                      [{'name': name, 'access': 'write'} for name in WRITES if name not in ('move_overdue', 'organize_day')]}]
+        for name, handler in (('get', self.get), ('time_context', self.time_context), ('tasks', self.store.tasks)):
+            self.operation(name, provides='polaris.schedule.' + name.replace('_', '-') + '@1',
+                           applicationBinding='instance')(handler)
         for name in WRITES:
-            self.operation(name, access='write')(self._writer(name))
+            self.operation(name, access='write', provides='polaris.schedule.' + name.replace('_', '-') + '@1',
+                           applicationBinding='instance')(self._writer(name))
         self.operation('create_view', access='write')(self.create_view)
         self.operation('release_view', access='write')(self.release_view)
 
@@ -44,13 +51,18 @@ class Schedule(Component):
             return result
         return write
 
+    def time_context(self):
+        return self.clock.context()
+
     def get(self):
         with self._lock:
             return {'tasks': self.store.tasks(), 'canUndo': self.store.can_undo,
-                    'storageNotice': self.store.storage_notice}
+                    'storageNotice': self.store.storage_notice, 'timeContext': self.time_context()}
 
     def describe(self):
         result = super().describe()
+        for name, metadata in BUSINESS_METADATA.items():
+            result['operations'][name] = dict(result['operations'][name], **deepcopy(metadata))
         for name in ('create_view', 'release_view'):
             result['operations'][name] = dict(result['operations'][name], profile='qt-native')
         return result
@@ -81,5 +93,5 @@ class Schedule(Component):
         super().stop()
 
 
-def create(data_dir=None):
-    return Schedule(data_dir)
+def create(data_dir=None, clock=None):
+    return Schedule(data_dir, clock=clock)
